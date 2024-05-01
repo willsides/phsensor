@@ -249,6 +249,28 @@ void setupDefaultMode() {
   button1.attachLongPressStart(handleCalibration);
 }
 
+void displayPHAndVoltage(float pH, int voltage) {
+    tft.fillScreen(TFT_BLACK); // Clear the screen
+
+    // Prepare the pH string
+    char buffer[20]; // Buffer to hold the formatted pH string
+    sprintf(buffer, "pH %.2f", pH); // Format pH to two decimal places
+
+    // Calculate positions
+    int centerX = tft.width() / 2;
+    int centerY = tft.height() / 2;
+
+    // Display pH
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(buffer, centerX, centerY - 10); // Adjust Y position as needed
+
+    // Prepare the voltage string
+    sprintf(buffer, "%d mV", voltage); // Use the voltage as it is
+
+    // Display voltage
+    tft.drawString(buffer, centerX, centerY + 10); // Adjust Y position as needed
+}
+
 void setup() {
   Serial.begin(115200);     // Start the Serial Monitor at 115200 baud rate
   tft.init();               // Initialize the TFT screen
@@ -269,10 +291,8 @@ void loop() {
   button1.tick();
   button2.tick();
   float voltage = readVoltage();
-  tft.fillScreen(TFT_BLACK); // Clear the screen with black
-  tft.setCursor(0, 0);       // Set the cursor at the top left corner of the screen
-  tft.setTextDatum(MC_DATUM); // Set the text datum to middle-center
-  tft.drawString("Voltage: " + String(voltage, 3) + "V", tft.width()/2, tft.height()/2); // Draw the string in the center
+  float pH = convertPH(voltage);
+  displayPHAndVoltage(pH, voltage);
 
   delay(100); // Wait for a second
 }
