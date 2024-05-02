@@ -1,8 +1,13 @@
 #include <TFT_eSPI.h>
 #include <OneButton.h>
 #include <math.h>  // Include for NAN and isnan()
+#include <Preferences.h>
+#include <WiFiManager.h>
+#include <PubSubClient.h>
 
 TFT_eSPI tft = TFT_eSPI();  // Create object "tft"
+WiFiManager wm;
+Preferences preferences;
 
 // Button setup
 OneButton button1(11, true, true);
@@ -17,6 +22,8 @@ float tempCalPoint4 = NAN;
 float tempCalPoint7 = NAN;
 float tempCalPoint10 = NAN;
 
+bool isAPActive = false;
+bool isInConfigMode = false;
 bool isInCalMode = false;
 float calibrationVoltage = 0.0;
 int currentCalPoint = NAN;
@@ -182,6 +189,9 @@ void handleCalibration() {
   button1.reset();
   button1.attachClick(nullptr);
   Serial.println("Calibration final confirmation");
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.println("Hold button 1 to accept calibration");
   while (isInCalMode) {
     button1.tick();
     button2.tick();
@@ -200,17 +210,25 @@ void acceptCalPoint() {
   stepCompleted = true;
 }
 
-// todo: Write values to EEPROM
+// Function to accept new calibration and save it to EEPROM
 void acceptNewCalibration() {
-  calPoint4 = tempCalPoint4;
-  calPoint7 = tempCalPoint7;
-  calPoint10 = tempCalPoint10;
-  isInCalMode = false;
-  Serial.println("Calibration accepted");
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(0, 0);
-  tft.println("Calibration accepted");
-  delay(2000);
+    calPoint4 = tempCalPoint4;
+    calPoint7 = tempCalPoint7;
+    calPoint10 = tempCalPoint10;
+
+	preferences.begin("pHSensor", false);
+	preferences.putFloat("calPoint4", calPoint4);
+	preferences.putFloat("calPoint7", calPoint7);
+	preferences.putFloat("calPoint10", calPoint10);
+	preferences.end();
+	
+    isInCalMode = false;
+    Serial.println("Calibration accepted");
+
+    tft.fillScreen(TFT_BLACK);
+    tft.setCursor(0, 0);
+    tft.println("Calibration accepted");
+    delay(2000);
 }
 
 void cancelCalibration() {
@@ -245,8 +263,83 @@ void displayStartCalibrationPrompt(int step) {
   tft.println("Insert the pH probe into " + s + " calibration standard");
 }
 
+void cancelConfiguration() {
+	if (isAPActive) {
+		deactivateAP();
+	}
+	Serial.println("Exiting configuration");
+	isInConfigMode = false;
+}
+
+void activateAP() {
+	isAPActive = true;
+	Serial.println("Starting AP");
+    wm.setConfigPortalBlocking(false);
+  	wm.startConfigPortal("WS-pHSensor", "potentialofhydrogen");
+	button1.attachLongPressStart(deactivateAP);
+}
+
+void deactivateAP(){
+	isAPActive = false;
+	Serial.println("Stopping AP");
+	wm.stopConfigPortal();
+	button1.attachLongPressStart(activateAP);
+}
+
+void handleConfiguration () {
+  isInConfigMode = true;
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.println("Entering configuration");
+  button1.reset();
+  button2.reset();
+  for (int i = 0; i < 20 ; i++) {
+  	Serial.println(String(i) + ". Button 1 State:" + String(button1.state()));
+    button1.tick();
+    button2.tick();
+	delay(100);
+  }
+  button1.attachClick(nullptr);
+  button2.attachClick(nullptr);
+  button1.attachLongPressStart(activateAP);
+  button2.attachLongPressStart(cancelConfiguration);
+
+  while(isInConfigMode) {
+	if (isAPActive) {
+		tft.fillScreen(TFT_BLACK);
+  		tft.setCursor(0, 0);
+		tft.println("Hold btn 1 to stop AP");
+		tft.println("Hold btn 2 to exit");
+		while (isAPActive && isInConfigMode) {
+			button1.tick();
+			button2.tick();
+			wm.process();
+			delay(100);
+		}
+	}
+	else {
+		tft.fillScreen(TFT_BLACK);
+  		tft.setCursor(0, 0);
+		tft.println("Hold btn 1 to start AP");
+		tft.println("Hold btn 2 to exit");
+		while (!isAPActive && isInConfigMode) {
+			button1.tick();
+			button2.tick();
+			delay(100);
+		}
+	}
+  }
+
+  setupDefaultMode();
+}
+
 void setupDefaultMode() {
+	
+	Serial.println("Starting pH mode");
+  button1.attachClick(nullptr);
+  button2.attachClick(nullptr);
   button1.attachLongPressStart(handleCalibration);
+  button2.attachLongPressStart(handleConfiguration);
 }
 
 void displayPHAndVoltage(float pH, int voltage) {
@@ -271,6 +364,19 @@ void displayPHAndVoltage(float pH, int voltage) {
     tft.drawString(buffer, centerX, centerY + 10); // Adjust Y position as needed
 }
 
+void handleCalibrationRequired() {
+  float pH = convertPH(readVoltage());
+  while (isnan(pH)) {
+	tft.fillScreen(TFT_BLACK);
+	tft.setCursor(0, 0);
+	tft.println("Calibration needed");
+	button1.tick();
+	button2.tick();
+	pH = convertPH(readVoltage());
+	delay(100);
+  }
+}
+
 void setup() {
   Serial.begin(115200);     // Start the Serial Monitor at 115200 baud rate
   tft.init();               // Initialize the TFT screen
@@ -281,8 +387,40 @@ void setup() {
   analogReadResolution(12); // Set the ADC resolution to 12 bits
   analogSetAttenuation(ADC_2_5db);
 
-  button1.setDebounceMs(50);
-  button2.setDebounceMs(50);
+  	preferences.begin("pHSensor", true);
+	calPoint4 = preferences.getFloat("calPoint4", calPoint4);
+	calPoint7 = preferences.getFloat("calPoint7", calPoint7);
+	calPoint10 = preferences.getFloat("calPoint10", calPoint10);
+	preferences.end();
+
+    Serial.print("Calibration Point 4: ");
+    Serial.println(calPoint4);
+    Serial.print("Calibration Point 7: ");
+    Serial.println(calPoint7);
+    Serial.print("Calibration Point 10: ");
+    Serial.println(calPoint10);
+
+	if (calPoint4 <= 0 || calPoint4 > 1100) {
+	calPoint4 = NAN;
+	preferences.begin("pHSensor", false);
+	preferences.putFloat("calPoint4", calPoint4);
+	preferences.end();
+	}
+	if (calPoint7 <= 0 || calPoint7 > 1100) {
+	calPoint7 = NAN;
+	preferences.begin("pHSensor", false);
+	preferences.putFloat("calPoint7", calPoint7);
+	preferences.end();
+	}
+	if (calPoint10 <= 0 || calPoint10 > 1100) {
+	calPoint10 = NAN;
+	preferences.begin("pHSensor", false);
+	preferences.putFloat("calPoint10", calPoint10);
+	preferences.end();
+	}
+
+  button1.setDebounceMs(20);
+  button2.setDebounceMs(20);
   
   setupDefaultMode();
 }
@@ -292,7 +430,8 @@ void loop() {
   button2.tick();
   float voltage = readVoltage();
   float pH = convertPH(voltage);
-  displayPHAndVoltage(pH, voltage);
+  if (isnan(pH)){ handleCalibrationRequired();
+  } else {displayPHAndVoltage(pH, voltage);}
 
   delay(100); // Wait for a second
 }
