@@ -1,13 +1,19 @@
 #include <TFT_eSPI.h>
 #include <OneButton.h>
-#include <math.h>  // Include for NAN and isnan()
+#include <math.h>
 #include <Preferences.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 
-TFT_eSPI tft = TFT_eSPI();  // Create object "tft"
+TFT_eSPI tft = TFT_eSPI(); 
 WiFiManager wm;
 Preferences preferences;
+
+char mqtt_server[40];
+char mqtt_port[6];
+
+WiFiManagerParameter wmparam_mqtt_server("server", "mqtt server", mqtt_server, 40);
+WiFiManagerParameter wmparam_mqtt_port("port", "mqtt port", mqtt_port, 6);
 
 // Button setup
 OneButton button1(11, true, true);
@@ -28,6 +34,7 @@ bool isInCalMode = false;
 float calibrationVoltage = 0.0;
 int currentCalPoint = NAN;
 bool stepCompleted = false;
+bool isInCalRequiredMode = false;
 
 const int adcPin = 9;      // ADC pin number
 float voltage = 0.0;        // Voltage measured from ADC
@@ -110,13 +117,13 @@ void handleCalibration() {
     button2.tick();
 	delay(100);
   }  
-  
+  isInCalRequiredMode = false;
   isInCalMode = true;
   tempCalPoint4 = NAN;
   tempCalPoint7 = NAN;
   tempCalPoint10 = NAN;
 
-  button2.attachClick(cancelCalibration);
+  button2.attachLongPressStart(cancelCalibration);
   Serial.println("Calibration step 1");
   int calStep = 1;
   stepCompleted = false;
@@ -135,7 +142,9 @@ void handleCalibration() {
     button1.tick();
     button2.tick();
   }
-  if (!isInCalMode) return;
+  if (!isInCalMode) {
+    setupDefaultMode();
+    return;}
   
   button1.reset();
   button1.attachClick(nullptr);
@@ -159,7 +168,9 @@ void handleCalibration() {
     button1.tick();
     button2.tick();
   }
-  if (!isInCalMode) return;
+  if (!isInCalMode) {
+    setupDefaultMode();
+    return;}
 
   button1.reset();
   button1.attachClick(nullptr);
@@ -184,7 +195,9 @@ void handleCalibration() {
     button1.tick();
     button2.tick();
   }
-  if (!isInCalMode) return;
+  if (!isInCalMode) {
+    setupDefaultMode();
+    return;}
   
   button1.reset();
   button1.attachClick(nullptr);
@@ -274,8 +287,8 @@ void cancelConfiguration() {
 void activateAP() {
 	isAPActive = true;
 	Serial.println("Starting AP");
-    wm.setConfigPortalBlocking(false);
-  	wm.startConfigPortal("WS-pHSensor", "potentialofhydrogen");
+  wm.setConfigPortalBlocking(false);
+	wm.startConfigPortal("WS-pHSensor", "potentialofhydrogen");
 	button1.attachLongPressStart(deactivateAP);
 }
 
@@ -287,6 +300,7 @@ void deactivateAP(){
 }
 
 void handleConfiguration () {
+  isInCalRequiredMode = false;
   isInConfigMode = true;
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
@@ -329,12 +343,10 @@ void handleConfiguration () {
 		}
 	}
   }
-
   setupDefaultMode();
 }
 
 void setupDefaultMode() {
-	
 	Serial.println("Starting pH mode");
   button1.attachClick(nullptr);
   button2.attachClick(nullptr);
@@ -365,16 +377,34 @@ void displayPHAndVoltage(float pH, int voltage) {
 }
 
 void handleCalibrationRequired() {
+  isInCalRequiredMode = true;
   float pH = convertPH(readVoltage());
-  while (isnan(pH)) {
 	tft.fillScreen(TFT_BLACK);
 	tft.setCursor(0, 0);
 	tft.println("Calibration needed");
+  while (isnan(pH) & isInCalRequiredMode) {
 	button1.tick();
 	button2.tick();
 	pH = convertPH(readVoltage());
 	delay(100);
   }
+  setupDefaultMode();
+}
+
+void saveParamsCallback () {
+  Serial.println("Saving params");
+  strncpy(mqtt_server, wmparam_mqtt_server.getValue(), sizeof(mqtt_server) - 1);
+  mqtt_server[sizeof(mqtt_server) - 1] = '\0'; // Ensure null-termination
+  strncpy(mqtt_port, wmparam_mqtt_port.getValue(), sizeof(mqtt_port) - 1);
+  mqtt_port[sizeof(mqtt_port) - 1] = '\0'; // Ensure null-termination
+  Serial.print("mqtt server: ");
+  Serial.println(mqtt_server);
+  Serial.print("mqtt port: ");
+  Serial.println(mqtt_port);
+  preferences.begin("mqtt", false);
+	preferences.putString("mqtt_server", mqtt_server);
+	preferences.putString("mqtt_port", mqtt_port);
+	preferences.end();
 }
 
 void setup() {
@@ -388,9 +418,9 @@ void setup() {
   analogSetAttenuation(ADC_2_5db);
 
   	preferences.begin("pHSensor", true);
-	calPoint4 = preferences.getFloat("calPoint4", calPoint4);
-	calPoint7 = preferences.getFloat("calPoint7", calPoint7);
-	calPoint10 = preferences.getFloat("calPoint10", calPoint10);
+	calPoint4 = preferences.getFloat("calPoint4", NAN);
+	calPoint7 = preferences.getFloat("calPoint7", NAN);
+	calPoint10 = preferences.getFloat("calPoint10", NAN);
 	preferences.end();
 
     Serial.print("Calibration Point 4: ");
@@ -421,6 +451,25 @@ void setup() {
 
   button1.setDebounceMs(20);
   button2.setDebounceMs(20);
+
+  preferences.begin("mqtt", true);
+  strncpy(mqtt_server, preferences.getString("mqtt_server", "").c_str(), sizeof(mqtt_server) - 1);
+  mqtt_server[sizeof(mqtt_server) - 1] = '\0'; // Ensure null-termination
+  strncpy(mqtt_port, preferences.getString("mqtt_port", "1883").c_str(), sizeof(mqtt_port) - 1);
+  mqtt_port[sizeof(mqtt_port) - 1] = '\0'; // Ensure null-termination
+	preferences.end();
+
+  Serial.print("MQTT server: ");
+  Serial.println(mqtt_server);
+  Serial.print("MQTT port: ");
+  Serial.println(mqtt_port);
+
+  wmparam_mqtt_server.setValue(mqtt_server, 40);
+  wmparam_mqtt_port.setValue(mqtt_port, 6);
+
+  wm.addParameter(&wmparam_mqtt_server);
+  wm.addParameter(&wmparam_mqtt_port);
+  wm.setSaveParamsCallback(saveParamsCallback);
   
   setupDefaultMode();
 }
@@ -430,8 +479,8 @@ void loop() {
   button2.tick();
   float voltage = readVoltage();
   float pH = convertPH(voltage);
-  if (isnan(pH)){ handleCalibrationRequired();
-  } else {displayPHAndVoltage(pH, voltage);}
+  if (isnan(pH)){ handleCalibrationRequired();}
+  else {displayPHAndVoltage(pH, voltage);}
 
   delay(100); // Wait for a second
 }
