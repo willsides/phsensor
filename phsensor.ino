@@ -5,12 +5,24 @@
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+const char* mqtt_root = "homeassistant";
+
 TFT_eSPI tft = TFT_eSPI(); 
 WiFiManager wm;
 Preferences preferences;
 
 char mqtt_server[40];
 char mqtt_port[6];
+
+bool hasValidMQTTSettings = false;
+unsigned long lastMQTTReconnectAttempt = 0;
+const long mqttReconnectInterval = 10 * 60000;
+
+const unsigned long publishInterval = 60000;
+unsigned long lastPublishTime = 0;
 
 WiFiManagerParameter wmparam_mqtt_server("server", "mqtt server", mqtt_server, 40);
 WiFiManagerParameter wmparam_mqtt_port("port", "mqtt port", mqtt_port, 6);
@@ -225,9 +237,9 @@ void acceptCalPoint() {
 
 // Function to accept new calibration and save it to EEPROM
 void acceptNewCalibration() {
-    calPoint4 = tempCalPoint4;
-    calPoint7 = tempCalPoint7;
-    calPoint10 = tempCalPoint10;
+  calPoint4 = tempCalPoint4;
+  calPoint7 = tempCalPoint7;
+  calPoint10 = tempCalPoint10;
 
 	preferences.begin("pHSensor", false);
 	preferences.putFloat("calPoint4", calPoint4);
@@ -235,13 +247,13 @@ void acceptNewCalibration() {
 	preferences.putFloat("calPoint10", calPoint10);
 	preferences.end();
 	
-    isInCalMode = false;
-    Serial.println("Calibration accepted");
+  isInCalMode = false;
+  Serial.println("Calibration accepted");
 
-    tft.fillScreen(TFT_BLACK);
-    tft.setCursor(0, 0);
-    tft.println("Calibration accepted");
-    delay(2000);
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.println("Calibration accepted");
+  delay(2000);
 }
 
 void cancelCalibration() {
@@ -321,7 +333,7 @@ void handleConfiguration () {
   while(isInConfigMode) {
 	if (isAPActive) {
 		tft.fillScreen(TFT_BLACK);
-  		tft.setCursor(0, 0);
+  	tft.setCursor(0, 0);
 		tft.println("Hold btn 1 to stop AP");
 		tft.println("Hold btn 2 to exit");
 		while (isAPActive && isInConfigMode) {
@@ -333,7 +345,7 @@ void handleConfiguration () {
 	}
 	else {
 		tft.fillScreen(TFT_BLACK);
-  		tft.setCursor(0, 0);
+  	tft.setCursor(0, 0);
 		tft.println("Hold btn 1 to start AP");
 		tft.println("Hold btn 2 to exit");
 		while (!isAPActive && isInConfigMode) {
@@ -352,6 +364,15 @@ void setupDefaultMode() {
   button2.attachClick(nullptr);
   button1.attachLongPressStart(handleCalibration);
   button2.attachLongPressStart(handleConfiguration);
+
+  if (strlen(mqtt_server) > 0 && strlen(mqtt_port) > 0) hasValidMQTTSettings = true;
+  else hasValidMQTTSettings = false;
+  if (hasValidMQTTSettings && !mqttClient.connected()) {
+      mqttClient.setServer(mqtt_server, atoi(mqtt_port));
+      mqttConnect(); // Attempt to connect to MQTT
+  }
+
+  publishDeviceConfig();
 }
 
 void displayPHAndVoltage(float pH, int voltage) {
@@ -391,6 +412,63 @@ void handleCalibrationRequired() {
   setupDefaultMode();
 }
 
+void updateCalValuesFromFlash() {
+  Serial.println("Fetching cal values from memory");
+  preferences.begin("pHSensor", true);
+	calPoint4 = preferences.getFloat("calPoint4", NAN);
+  if (calPoint4 <= 0 || calPoint4 > 1100){
+    calPoint4 = NAN;
+    preferences.putFloat("calPoint4", calPoint4);
+  } 
+	calPoint7 = preferences.getFloat("calPoint7", NAN);
+	if (calPoint7 <= 0 || calPoint7 > 1100) {
+    calPoint7 = NAN;
+    preferences.putFloat("calPoint7", calPoint7);
+	}
+  calPoint10 = preferences.getFloat("calPoint10", NAN);
+	if (calPoint10 <= 0 || calPoint10 > 1100) {
+    calPoint10 = NAN;
+    preferences.putFloat("calPoint10", calPoint10);
+	}
+	preferences.end();
+
+  Serial.print("Calibration Point 4: ");
+  Serial.println(calPoint4);
+  Serial.print("Calibration Point 7: ");
+  Serial.println(calPoint7);
+  Serial.print("Calibration Point 10: ");
+  Serial.println(calPoint10);
+}
+
+void updateSettingsFromFlash() {
+  Serial.println("Fetching settings from memory");
+  
+  preferences.begin("mqtt", true);
+  strncpy(mqtt_server, preferences.getString("mqtt_server", "").c_str(), sizeof(mqtt_server) - 1);
+  mqtt_server[sizeof(mqtt_server) - 1] = '\0'; // Ensure null-termination
+  strncpy(mqtt_port, preferences.getString("mqtt_port", "1883").c_str(), sizeof(mqtt_port) - 1);
+  mqtt_port[sizeof(mqtt_port) - 1] = '\0'; // Ensure null-termination
+	preferences.end();
+
+  Serial.print("MQTT server: ");
+  Serial.println(mqtt_server);
+  Serial.print("MQTT port: ");
+  Serial.println(mqtt_port);
+}
+
+void setupWifiManager() {
+  wmparam_mqtt_server.setValue(mqtt_server, 40);
+  wmparam_mqtt_port.setValue(mqtt_port, 6);
+  wm.addParameter(&wmparam_mqtt_server);
+  wm.addParameter(&wmparam_mqtt_port);
+  wm.setSaveParamsCallback(saveParamsCallback);
+  wm.setSaveConfigCallback(saveConfigCallback);
+  
+  wm.setEnableConfigPortal(false);
+  wm.setConfigPortalBlocking(false);
+  wm.autoConnect();
+}
+
 void saveParamsCallback () {
   Serial.println("Saving params");
   strncpy(mqtt_server, wmparam_mqtt_server.getValue(), sizeof(mqtt_server) - 1);
@@ -407,80 +485,138 @@ void saveParamsCallback () {
 	preferences.end();
 }
 
-void setup() {
-  Serial.begin(115200);     // Start the Serial Monitor at 115200 baud rate
+void saveConfigCallback() {
+	isAPActive = false;
+	Serial.println("Connected to WiFi");
+	button1.attachLongPressStart(activateAP);
+}
+
+void setupTFT() {
   tft.init();               // Initialize the TFT screen
   tft.setRotation(3);       // Set the rotation before using fillScreen
   tft.fillScreen(TFT_BLACK);  // Clear screen
   tft.setTextColor(TFT_WHITE, TFT_BLACK); // Set the font color and the background color
   tft.setTextSize(2);       // Set the text size
+}
+
+void mqttConnect() {
+    if (!mqttClient.connected()) {
+        Serial.println("Attempting MQTT connection...");
+        // Attempt to connect (clientID, username, password can be added as parameters)
+        if (mqttClient.connect("ESP32Client")) {
+            Serial.println("connected to MQTT server");
+            // Here you can also subscribe to topics
+            // mqttClient.subscribe("your/topic");
+        } else {
+            Serial.print("failed, rc=");
+            Serial.print(mqttClient.state());
+            Serial.println(" try again in 10 minutes");
+            lastMQTTReconnectAttempt = millis();
+        }
+    }
+}
+
+void publishState() {
+    float voltage = readVoltage();
+    float pH = convertPH(voltage);
+
+    String stateTopic = String(mqtt_root) + "/sensor/WS_pH_sensor/state";
+    String statePayload = "{";
+    statePayload += "\"pH\":" + String(pH, 2) + ",";
+    statePayload += "\"voltage\":" + String(voltage, 2) + ",";
+    statePayload += "\"calPoint4\":" + String(calPoint4, 2) + ",";
+    statePayload += "\"calPoint7\":" + String(calPoint7, 2) + ",";
+    statePayload += "\"calPoint10\":" + String(calPoint10, 2);
+    statePayload += "}";
+
+    publishMQTT(stateTopic.c_str(), statePayload.c_str(), false);
+}
+
+void processMQTT() {
+  unsigned long now = millis();
+  if (!mqttClient.connected()) {
+      if (now - lastMQTTReconnectAttempt > mqttReconnectInterval) {
+          lastMQTTReconnectAttempt = now;
+          // Try to reconnect
+          mqttConnect();
+      }
+  } else {
+      mqttClient.loop(); // This needs to be called regularly to allow MQTT communication
+      if (now - lastPublishTime >= publishInterval) {
+        lastPublishTime = now;
+        publishState();
+      }
+  }
+}
+
+void publishMQTT(const char* topic, const char* payload, bool retain) {
+    Serial.print("Attempting to send message to topic ");
+    Serial.println(topic);
+    Serial.println(payload);
+    if (mqttClient.connected()) {
+        mqttClient.publish(topic, payload, retain);
+        Serial.println("MQTT message sent.");
+    } else {
+        Serial.println("MQTT not connected, message not sent.");
+    }
+}
+
+void publishDeviceConfig() {
+    String configTopic = String(mqtt_root) + "/sensor/WS_pH_sensor_pH/config";
+    String configPayloadPH = "{";
+    configPayloadPH += "\"device_class\": \"pH\",";
+    configPayloadPH += "\"name\": \"WS pH Sensor pH\",";
+    configPayloadPH += "\"state_topic\": \"" + String(mqtt_root) + "/sensor/WS_pH_sensor/state\",";
+    configPayloadPH += "\"unit_of_measurement\": \"pH\",";
+    configPayloadPH += "\"value_template\": \"{{ value_json.pH }}\",";
+    configPayloadPH += "\"unique_id\": \"pH_sensor_65b6221c-b311-4e83-bc7e-7eb8ceabf070\"";
+    configPayloadPH += "}";
+
+    publishMQTT(configTopic.c_str(), configPayloadPH.c_str(), true);
+
+    String configTopicVoltage = String(mqtt_root) + "/sensor/WS_pH_sensor_voltage/config";
+    String configPayloadVoltage = "{";
+    configPayloadVoltage += "\"device_class\": \"voltage\",";
+    configPayloadVoltage += "\"name\": \"WS pH Sensor Voltage\",";
+    configPayloadVoltage += "\"state_topic\": \"" + String(mqtt_root) + "/sensor/WS_pH_sensor/state\",";
+    configPayloadVoltage += "\"unit_of_measurement\": \"mV\",";
+    configPayloadVoltage += "\"value_template\": \"{{ value_json.voltage }}\",";
+    configPayloadVoltage += "\"unique_id\": \"pH_sensor_mV_fce62792-a9a4-471d-954e-36aa61ee852c\"";
+    configPayloadVoltage += "}";
+
+    publishMQTT(configTopicVoltage.c_str(), configPayloadVoltage.c_str(), true);
+}
+
+bool isConnectedToWiFi() {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+void setup() {
+  Serial.begin(115200);     // Start the Serial Monitor at 115200 baud rate
+  WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP 
   analogReadResolution(12); // Set the ADC resolution to 12 bits
   analogSetAttenuation(ADC_2_5db);
-
-  	preferences.begin("pHSensor", true);
-	calPoint4 = preferences.getFloat("calPoint4", NAN);
-	calPoint7 = preferences.getFloat("calPoint7", NAN);
-	calPoint10 = preferences.getFloat("calPoint10", NAN);
-	preferences.end();
-
-    Serial.print("Calibration Point 4: ");
-    Serial.println(calPoint4);
-    Serial.print("Calibration Point 7: ");
-    Serial.println(calPoint7);
-    Serial.print("Calibration Point 10: ");
-    Serial.println(calPoint10);
-
-	if (calPoint4 <= 0 || calPoint4 > 1100) {
-	calPoint4 = NAN;
-	preferences.begin("pHSensor", false);
-	preferences.putFloat("calPoint4", calPoint4);
-	preferences.end();
-	}
-	if (calPoint7 <= 0 || calPoint7 > 1100) {
-	calPoint7 = NAN;
-	preferences.begin("pHSensor", false);
-	preferences.putFloat("calPoint7", calPoint7);
-	preferences.end();
-	}
-	if (calPoint10 <= 0 || calPoint10 > 1100) {
-	calPoint10 = NAN;
-	preferences.begin("pHSensor", false);
-	preferences.putFloat("calPoint10", calPoint10);
-	preferences.end();
-	}
-
   button1.setDebounceMs(20);
   button2.setDebounceMs(20);
 
-  preferences.begin("mqtt", true);
-  strncpy(mqtt_server, preferences.getString("mqtt_server", "").c_str(), sizeof(mqtt_server) - 1);
-  mqtt_server[sizeof(mqtt_server) - 1] = '\0'; // Ensure null-termination
-  strncpy(mqtt_port, preferences.getString("mqtt_port", "1883").c_str(), sizeof(mqtt_port) - 1);
-  mqtt_port[sizeof(mqtt_port) - 1] = '\0'; // Ensure null-termination
-	preferences.end();
+  setupTFT();
 
-  Serial.print("MQTT server: ");
-  Serial.println(mqtt_server);
-  Serial.print("MQTT port: ");
-  Serial.println(mqtt_port);
+  updateSettingsFromFlash();
 
-  wmparam_mqtt_server.setValue(mqtt_server, 40);
-  wmparam_mqtt_port.setValue(mqtt_port, 6);
+  updateCalValuesFromFlash();
 
-  wm.addParameter(&wmparam_mqtt_server);
-  wm.addParameter(&wmparam_mqtt_port);
-  wm.setSaveParamsCallback(saveParamsCallback);
-  
+  setupWifiManager();
+
   setupDefaultMode();
 }
 
 void loop() {
   button1.tick();
   button2.tick();
+  processMQTT();
   float voltage = readVoltage();
   float pH = convertPH(voltage);
   if (isnan(pH)){ handleCalibrationRequired();}
   else {displayPHAndVoltage(pH, voltage);}
-
   delay(100); // Wait for a second
 }
