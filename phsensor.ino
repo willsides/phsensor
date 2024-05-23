@@ -246,6 +246,8 @@ void acceptNewCalibration() {
 	preferences.putFloat("calPoint7", calPoint7);
 	preferences.putFloat("calPoint10", calPoint10);
 	preferences.end();
+
+  publishCalValues();
 	
   isInCalMode = false;
   Serial.println("Calibration accepted");
@@ -371,8 +373,6 @@ void setupDefaultMode() {
       mqttClient.setServer(mqtt_server, atoi(mqtt_port));
       mqttConnect(); // Attempt to connect to MQTT
   }
-
-  publishDeviceConfig();
 }
 
 void displayPHAndVoltage(float pH, int voltage) {
@@ -505,8 +505,8 @@ void mqttConnect() {
         // Attempt to connect (clientID, username, password can be added as parameters)
         if (mqttClient.connect("ESP32Client")) {
             Serial.println("connected to MQTT server");
-            // Here you can also subscribe to topics
-            // mqttClient.subscribe("your/topic");
+            publishDeviceConfig();
+            publishCalValues();
         } else {
             Serial.print("failed, rc=");
             Serial.print(mqttClient.state());
@@ -514,22 +514,6 @@ void mqttConnect() {
             lastMQTTReconnectAttempt = millis();
         }
     }
-}
-
-void publishState() {
-    float voltage = readVoltage();
-    float pH = convertPH(voltage);
-
-    String stateTopic = String(mqtt_root) + "/sensor/WS_pH_sensor/state";
-    String statePayload = "{";
-    statePayload += "\"pH\":" + String(pH, 2) + ",";
-    statePayload += "\"voltage\":" + String(voltage, 2) + ",";
-    statePayload += "\"calPoint4\":" + String(calPoint4, 2) + ",";
-    statePayload += "\"calPoint7\":" + String(calPoint7, 2) + ",";
-    statePayload += "\"calPoint10\":" + String(calPoint10, 2);
-    statePayload += "}";
-
-    publishMQTT(stateTopic.c_str(), statePayload.c_str(), false);
 }
 
 void processMQTT() {
@@ -554,8 +538,10 @@ void publishMQTT(const char* topic, const char* payload, bool retain) {
     Serial.println(topic);
     Serial.println(payload);
     if (mqttClient.connected()) {
-        mqttClient.publish(topic, payload, retain);
-        Serial.println("MQTT message sent.");
+        if (mqttClient.publish(topic, payload, retain)) {
+          Serial.println("MQTT message sent successfully.");
+        } else {Serial.println("MQTT message failed to send.");}
+
     } else {
         Serial.println("MQTT not connected, message not sent.");
     }
@@ -564,27 +550,58 @@ void publishMQTT(const char* topic, const char* payload, bool retain) {
 void publishDeviceConfig() {
     String configTopic = String(mqtt_root) + "/sensor/WS_pH_sensor_pH/config";
     String configPayloadPH = "{";
-    configPayloadPH += "\"device_class\": \"pH\",";
     configPayloadPH += "\"name\": \"WS pH Sensor pH\",";
+    configPayloadPH += "\"device_class\": \"ph\",";
     configPayloadPH += "\"state_topic\": \"" + String(mqtt_root) + "/sensor/WS_pH_sensor/state\",";
+    configPayloadPH += "\"json_attributes_topic\": \"" + String(mqtt_root) + "/sensor/WS_pH_sensor/attributes\",";
     configPayloadPH += "\"unit_of_measurement\": \"pH\",";
     configPayloadPH += "\"value_template\": \"{{ value_json.pH }}\",";
-    configPayloadPH += "\"unique_id\": \"pH_sensor_65b6221c-b311-4e83-bc7e-7eb8ceabf070\"";
-    configPayloadPH += "}";
+    configPayloadPH += "\"unique_id\": \"pH_sensor_65b6221c-b311-4e83-bc7e-7eb8ceabf070\",";
+    configPayloadPH += "\"device\": {";
+    configPayloadPH += "\"identifiers\": [\"WS_pH_Sensor\"],";
+    configPayloadPH += "\"name\": \"pH Sensor\"";
+    configPayloadPH += "}}";
 
     publishMQTT(configTopic.c_str(), configPayloadPH.c_str(), true);
 
     String configTopicVoltage = String(mqtt_root) + "/sensor/WS_pH_sensor_voltage/config";
     String configPayloadVoltage = "{";
-    configPayloadVoltage += "\"device_class\": \"voltage\",";
     configPayloadVoltage += "\"name\": \"WS pH Sensor Voltage\",";
+    configPayloadVoltage += "\"device_class\": \"voltage\",";
     configPayloadVoltage += "\"state_topic\": \"" + String(mqtt_root) + "/sensor/WS_pH_sensor/state\",";
     configPayloadVoltage += "\"unit_of_measurement\": \"mV\",";
     configPayloadVoltage += "\"value_template\": \"{{ value_json.voltage }}\",";
-    configPayloadVoltage += "\"unique_id\": \"pH_sensor_mV_fce62792-a9a4-471d-954e-36aa61ee852c\"";
-    configPayloadVoltage += "}";
+    configPayloadVoltage += "\"unique_id\": \"pH_sensor_mV_fce62792-a9a4-471d-954e-36aa61ee852c\",";
+    configPayloadVoltage += "\"device\": {";
+    configPayloadVoltage += "\"identifiers\": [\"WS_pH_Sensor\"],";
+    configPayloadVoltage += "\"name\": \"pH Sensor\"";
+    configPayloadVoltage += "}}";
 
     publishMQTT(configTopicVoltage.c_str(), configPayloadVoltage.c_str(), true);
+}
+
+void publishCalValues() {
+    String stateTopic = String(mqtt_root) + "/sensor/WS_pH_sensor/attributes";
+    String statePayload = "{";
+    statePayload += "\"calPoint4\":" + String(calPoint4, 2) + ",";
+    statePayload += "\"calPoint7\":" + String(calPoint7, 2) + ",";
+    statePayload += "\"calPoint10\":" + String(calPoint10, 2);
+    statePayload += "}";
+
+    publishMQTT(stateTopic.c_str(), statePayload.c_str(), true);
+}
+
+void publishState() {
+    float voltage = readVoltage();
+    float pH = convertPH(voltage);
+
+    String stateTopic = String(mqtt_root) + "/sensor/WS_pH_sensor/state";
+    String statePayload = "{";
+    statePayload += "\"pH\":" + String(pH, 2) + ",";
+    statePayload += "\"voltage\":" + String(voltage, 2);
+    statePayload += "}";
+
+    publishMQTT(stateTopic.c_str(), statePayload.c_str(), false);
 }
 
 bool isConnectedToWiFi() {
@@ -596,6 +613,7 @@ void setup() {
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP 
   analogReadResolution(12); // Set the ADC resolution to 12 bits
   analogSetAttenuation(ADC_2_5db);
+  mqttClient.setBufferSize(4096);
   button1.setDebounceMs(20);
   button2.setDebounceMs(20);
 
